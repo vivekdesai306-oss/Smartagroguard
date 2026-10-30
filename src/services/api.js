@@ -1,22 +1,34 @@
 import axios from 'axios';
 
-/**
- * Dynamically resolve backend base URL:
- * - If VITE_API_URL is configured in Vercel environment variables, use that production backend.
- * - In local dev with Vite reverse proxy, empty string '' routes '/api' requests through Vite
- *   to http://127.0.0.1:8000 seamlessly for both desktop and mobile devices.
- */
-const getBaseURL = () => {
-  if (import.meta.env.VITE_API_URL) {
-    return import.meta.env.VITE_API_URL.replace(/\/$/, '');
+// Automatically detect whether we're in production (Vercel/cloud) or local dev
+const getBaseUrl = () => {
+  if (typeof window !== 'undefined' && window.__AGROGUARD_API_URL__) {
+    return window.__AGROGUARD_API_URL__;
   }
-  if (typeof window === 'undefined') return 'http://localhost:8000';
-  return '';
+  // Vite env variable if provided
+  if (import.meta.env?.VITE_API_URL) {
+    return import.meta.env.VITE_API_URL;
+  }
+  if (typeof window !== 'undefined' && window.location.hostname) {
+    const host = window.location.hostname;
+    // If accessing via local machine or hotspot / LAN IP (e.g. 192.168.x.x)
+    if (
+      host === 'localhost' ||
+      host === '127.0.0.1' ||
+      host.startsWith('192.168.') ||
+      host.startsWith('10.') ||
+      host.startsWith('172.')
+    ) {
+      return `http://${host}:8000`;
+    }
+  }
+  // Public production cloud backend (Render)
+  return 'https://smartagroguard-backend-1.onrender.com';
 };
 
 const api = axios.create({
-  baseURL: getBaseURL(),
-  timeout: 20000,
+  baseURL: getBaseUrl(),
+  timeout: 45000,
 });
 
 // Request interceptor to automatically insert authorization token
@@ -29,6 +41,20 @@ api.interceptors.request.use(
     return config;
   },
   (error) => {
+    return Promise.reject(error);
+  }
+);
+
+// Response interceptor to handle 401 Unauthorized automatically
+api.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (error.response && error.response.status === 401) {
+      localStorage.removeItem('token');
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('agroguard:unauthorized'));
+      }
+    }
     return Promise.reject(error);
   }
 );

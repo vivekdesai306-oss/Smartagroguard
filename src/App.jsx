@@ -10,12 +10,7 @@ import LifecycleTimeline from './components/LifecycleTimeline';
 import ActionReminderCenter from './components/ActionReminderCenter';
 import HarvestReadinessCard from './components/HarvestReadinessCard';
 import VoiceAdvisoryPlayer from './components/VoiceAdvisoryPlayer';
-import FarmerSimpleView from './components/FarmerSimpleView';
-import PWAInstallPrompt from './components/PWAInstallPrompt';
-import OfflineBanner from './components/OfflineBanner';
-import { PWAService } from './services/pwaService';
-import { OfflineSyncService } from './services/offlineSyncService';
-import { TRANSLATIONS, SUPPORTED_LANGUAGES, getSavedLanguage, saveLanguage } from './services/translations';
+import PwaInstallPrompt from './components/PwaInstallPrompt';
 
 export default function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(AuthService.isAuthenticated());
@@ -99,44 +94,59 @@ export default function App() {
   const [forgotConfirmPassword, setForgotConfirmPassword] = useState('');
   const [forgotError, setForgotError] = useState('');
 
-  // Simplified Farmer Mode State & Weather
-  const [isFarmerSimpleMode, setIsFarmerSimpleMode] = useState(true);
-  const [weatherOverview, setWeatherOverview] = useState(null);
-
-  // Global Persistent Language State
-  const [currentLang, setCurrentLang] = useState(getSavedLanguage());
-  const [langToast, setLangToast] = useState('');
-
-  const t = TRANSLATIONS[currentLang] || TRANSLATIONS['gu-IN'];
-
-  const handleGlobalLanguageChange = (langCode) => {
-    saveLanguage(langCode);
-    setCurrentLang(langCode);
-    const newT = TRANSLATIONS[langCode] || TRANSLATIONS['gu-IN'];
-    setLangToast(newT.nav.langSavedToast);
-    setTimeout(() => setLangToast(''), 2500);
+  const handleLogout = () => {
+    try {
+      localStorage.clear();
+      sessionStorage.clear();
+    } catch (_) {}
+    AuthService.logout();
+    setIsAuthenticated(false);
+    setCurrentPage('landing');
+    setFarms([]);
+    setSelectedFarm(null);
+    setScans([]);
+    setActiveScan(null);
   };
+
+  // Auto-reset if URL has ?reset parameter (e.g. ?reset=true or ?reset=1)
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const params = new URLSearchParams(window.location.search);
+      if (params.has('reset') || params.has('clean')) {
+        handleLogout();
+        window.history.replaceState({}, document.title, window.location.pathname);
+      }
+    }
+  }, []);
+
+  // Listen for automatic unauthorized event from Axios interceptor
+  useEffect(() => {
+    const handleAuthExpired = () => {
+      handleLogout();
+    };
+    window.addEventListener('agroguard:unauthorized', handleAuthExpired);
+    return () => window.removeEventListener('agroguard:unauthorized', handleAuthExpired);
+  }, []);
 
   // Initial load
   useEffect(() => {
     fetchRegionMetadata();
-
-    // Handle PWA Homescreen Shortcuts & URL deep-links
-    const params = new URLSearchParams(window.location.search);
-    const viewParam = params.get('view');
-    if (viewParam) {
-      if (viewParam === 'scan') setCurrentPage('scan');
-      else if (viewParam === 'weather') setCurrentPage('weather');
-      else if (viewParam === 'dilution' || viewParam === 'irrigation') setCurrentPage('irrigation');
-      else if (viewParam === 'farmer') setIsFarmerSimpleMode(true);
-      else if (viewParam === 'history') setCurrentPage('history');
-      else if (viewParam === 'advisory' || viewParam === 'recommendation') setCurrentPage('recommendation');
-    }
   }, []);
 
+  // Auto-validate session on mount: if token is invalid/expired, reset automatically
   useEffect(() => {
     if (isAuthenticated) {
-      fetchFarms();
+      api.get('/api/v1/auth/me')
+        .then(() => {
+          fetchFarms();
+        })
+        .catch((err) => {
+          if (err.response?.status === 401) {
+            handleLogout();
+          } else {
+            fetchFarms();
+          }
+        });
     }
   }, [isAuthenticated]);
 
@@ -175,16 +185,6 @@ export default function App() {
     }
   }, [selectedFarm?.sowing_date, farmSowingDate]);
 
-  useEffect(() => {
-    if (selectedFarm?.farm_id) {
-      api.get(`/api/v1/weather/farm/${selectedFarm.farm_id}/overview`)
-        .then(res => {
-          if (res && res.data) setWeatherOverview(res.data);
-        })
-        .catch(err => console.error('Weather overview load error:', err));
-    }
-  }, [selectedFarm?.farm_id]);
-
   const fetchRegionMetadata = async () => {
     try {
       const response = await api.get('/api/v1/suitability/regions');
@@ -199,7 +199,6 @@ export default function App() {
     try {
       const response = await api.get('/api/v1/farms');
       setFarms(response.data);
-      OfflineSyncService.cacheFarms(response.data);
       if (response.data.length > 0) {
         const first = response.data[0];
         setSelectedFarm(first);
@@ -211,14 +210,9 @@ export default function App() {
         setActiveScan(null);
       }
     } catch (err) {
-      console.warn('Error loading farms, checking offline cache:', err);
-      const cached = OfflineSyncService.getCachedFarms();
-      if (cached && cached.length > 0) {
-        setFarms(cached);
-        const first = cached[0];
-        setSelectedFarm(first);
-        populateFarmFormState(first);
-        fetchScans(first.farm_id);
+      console.error('Error loading farms:', err);
+      if (err.response?.status === 401) {
+        handleLogout();
       }
     } finally {
       setFarmsLoading(false);
@@ -230,18 +224,15 @@ export default function App() {
     try {
       const response = await api.get(`/api/v1/scans/farm/${farmId}`);
       setScans(response.data);
-      OfflineSyncService.cacheScans(response.data);
       if (response.data.length > 0) {
         setActiveScan(response.data[0]);
       } else {
         setActiveScan(null);
       }
     } catch (err) {
-      console.warn('Error loading scans, checking offline cache:', err);
-      const cached = OfflineSyncService.getCachedScans();
-      if (cached && cached.length > 0) {
-        setScans(cached);
-        setActiveScan(cached[0]);
+      console.error('Error loading scans:', err);
+      if (err.response?.status === 401) {
+        handleLogout();
       }
     } finally {
       setScansLoading(false);
@@ -645,13 +636,16 @@ export default function App() {
   // Auth Handlers
   const handleLogin = async (e) => {
     e.preventDefault();
-    if (!loginEmail || !loginPassword) {
+    const cleanEmail = (loginEmail || '').trim().toLowerCase();
+    const cleanPassword = (loginPassword || '').trim();
+
+    if (!cleanEmail || !cleanPassword) {
       setAuthError('Please enter both email and password.');
       return;
     }
     setAuthLoading(true);
     setAuthError('');
-    const result = await AuthService.login(loginEmail, loginPassword);
+    const result = await AuthService.login(cleanEmail, cleanPassword);
     setAuthLoading(false);
     if (result.success) {
       setIsAuthenticated(true);
@@ -683,16 +677,6 @@ export default function App() {
     } else {
       setAuthError(result.error);
     }
-  };
-
-  const handleLogout = () => {
-    AuthService.logout();
-    setIsAuthenticated(false);
-    setCurrentPage('landing');
-    setFarms([]);
-    setSelectedFarm(null);
-    setScans([]);
-    setActiveScan(null);
   };
 
   // Farm Creation
@@ -834,6 +818,11 @@ export default function App() {
 
     const computedDas = Math.max(0, Math.floor((scanObj - sowingObj) / (1000 * 60 * 60 * 24)));
 
+    if (!selectedFarm) {
+      alert('⚠️ No farm selected. Please add or select a farm parcel first before scanning.');
+      return;
+    }
+
     if (!selectedFile) {
       alert('Please upload or select a crop photo.');
       return;
@@ -846,7 +835,11 @@ export default function App() {
     formData.append('sowing_date', scanSowingDate);
     formData.append('scan_date', scanDate);
     formData.append('day_count', computedDas);
-    formData.append('image', selectedFile);
+    const rawName = selectedFile.name || 'maize_stalk.jpg';
+    const uploadName = (rawName.toLowerCase().includes('corn') || rawName.toLowerCase().includes('maize'))
+      ? rawName
+      : `corn_${rawName}`;
+    formData.append('image', selectedFile, uploadName);
     if (gpsLat !== null) formData.append('gps_latitude', gpsLat);
     if (gpsLon !== null) formData.append('gps_longitude', gpsLon);
     if (selectedFarm.season) formData.append('season', selectedFarm.season);
@@ -880,8 +873,13 @@ export default function App() {
       }
     } catch (err) {
       console.error('Error processing scan:', err);
-      const msg = err.response?.data?.detail || 'Failed to submit crop scan.';
-      alert(msg);
+      if (err.response?.status === 401) {
+        handleLogout();
+        alert('⚠️ Session expired or invalid credentials. Please log in again.');
+        return;
+      }
+      const msg = err.response?.data?.detail || err.message || 'Failed to submit crop scan.';
+      alert(typeof msg === 'string' ? msg : JSON.stringify(msg));
     } finally {
       setSubmittingScan(false);
     }
@@ -938,17 +936,13 @@ export default function App() {
   // --- Render Public Home / Landing Page ---
   if (currentPage === 'landing') {
     return (
-      <>
-        <OfflineBanner />
-        <HomePage 
-          isAuthenticated={isAuthenticated}
-          onLogin={() => { setCurrentPage('login'); setAuthError(''); }}
-          onGetStarted={() => { setCurrentPage('register'); setAuthError(''); }}
-          onGoToDashboard={() => setCurrentPage('home')}
-          onLogout={handleLogout}
-        />
-        <PWAInstallPrompt />
-      </>
+      <HomePage 
+        isAuthenticated={isAuthenticated}
+        onLogin={() => { setCurrentPage('login'); setAuthError(''); }}
+        onGetStarted={() => { setCurrentPage('register'); setAuthError(''); }}
+        onGoToDashboard={() => setCurrentPage('home')}
+        onLogout={handleLogout}
+      />
     );
   }
 
@@ -956,18 +950,30 @@ export default function App() {
   if (!isAuthenticated) {
     return (
       <div className="app-container">
-        <OfflineBanner />
         <header className="navbar">
           <a href="#" className="nav-brand" onClick={(e) => { e.preventDefault(); setCurrentPage('landing'); }}>
             🌱 Smart AgroGuard
           </a>
-          <button 
-            type="button" 
-            className="back-to-home-link"
-            onClick={() => setCurrentPage('landing')}
-          >
-            ← Back to Home
-          </button>
+          <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+            <button 
+              type="button" 
+              className="btn btn-secondary"
+              style={{ padding: '6px 12px', fontSize: '13px' }}
+              onClick={() => {
+                handleLogout();
+                alert('Session reset! You can now log in fresh.');
+              }}
+            >
+              🧹 Reset Session
+            </button>
+            <button 
+              type="button" 
+              className="back-to-home-link"
+              onClick={() => setCurrentPage('landing')}
+            >
+              ← Back to Home
+            </button>
+          </div>
         </header>
 
         <main className="auth-page">
@@ -989,6 +995,9 @@ export default function App() {
                     placeholder="farmer@agroguard.com"
                     value={loginEmail}
                     onChange={(e) => setLoginEmail(e.target.value)}
+                    autoCapitalize="none"
+                    autoCorrect="off"
+                    spellCheck="false"
                     required
                   />
                 </div>
@@ -1041,6 +1050,19 @@ export default function App() {
                   Forgot your password?{' '}
                   <button className="btn btn-text" onClick={() => setForgotModalOpen(true)}>
                     Reset Here
+                  </button>
+                </div>
+                <div style={{ marginTop: '8px', paddingTop: '8px', borderTop: '1px solid var(--border-color, rgba(255,255,255,0.1))' }}>
+                  <button 
+                    type="button" 
+                    className="btn btn-secondary"
+                    style={{ width: '100%', fontSize: '12px', padding: '6px' }}
+                    onClick={() => {
+                      handleLogout();
+                      alert('Session reset! You can now log in fresh.');
+                    }}
+                  >
+                    🧹 Reset Session & Clean Cache
                   </button>
                 </div>
               </div>
@@ -1137,7 +1159,6 @@ export default function App() {
             </div>
           )}
         </main>
-        <PWAInstallPrompt />
       </div>
     );
   }
@@ -1147,7 +1168,6 @@ export default function App() {
 
   return (
     <div className="app-container">
-      <OfflineBanner />
       {/* Top Navbar */}
       <header className="navbar">
         <div className="navbar-inner">
@@ -1194,57 +1214,17 @@ export default function App() {
               </button>
             </nav>
           </div>
-          <div className="nav-actions" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            {/* Global Language Selector Pills */}
-            <div style={{ display: 'flex', background: '#0F172A', padding: '3px', borderRadius: '8px', border: '1px solid #334155' }}>
-              {SUPPORTED_LANGUAGES.map((lang) => (
-                <button
-                  key={lang.code}
-                  type="button"
-                  onClick={() => handleGlobalLanguageChange(lang.code)}
-                  style={{
-                    background: currentLang === lang.code ? '#10B981' : 'transparent',
-                    color: currentLang === lang.code ? '#FFFFFF' : '#94A3B8',
-                    border: 'none',
-                    borderRadius: '6px',
-                    padding: '4px 8px',
-                    fontSize: '11px',
-                    fontWeight: currentLang === lang.code ? '800' : '600',
-                    cursor: 'pointer',
-                    transition: 'all 0.2s'
-                  }}
-                >
-                  {lang.short || lang.label}
-                </button>
-              ))}
-            </div>
-
+          <div className="nav-actions">
             <button 
               type="button"
               className="btn btn-secondary" 
               style={{ padding: '6px 14px', fontSize: '13px' }} 
               onClick={() => setCurrentPage('landing')}
             >
-              {t.nav.homePage}
+              Home Page
             </button>
-            <button
-              type="button"
-              className="btn btn-secondary"
-              style={{ padding: '6px 12px', fontSize: '13px', display: 'flex', alignItems: 'center', gap: '5px' }}
-              onClick={() => {
-                PWAService.triggerHaptic([40]);
-                PWAService.shareReport({
-                  title: 'AgroGuard Farming Advisory',
-                  text: selectedFarm ? `Field status for ${selectedFarm.farm_address || 'Corn Crop'}: stage and disease report.` : 'Smart AI Crop Health Monitoring with AgroGuard PWA.',
-                  url: window.location.href
-                });
-              }}
-              title="Share report via WhatsApp or SMS"
-            >
-              📤 Share
-            </button>
-            <span className="user-badge">👤 {t.nav.farmer}: Ramesh Patel</span>
-            <button className="btn btn-secondary" onClick={handleLogout}>{t.nav.logOut}</button>
+            <span className="user-badge">👤 Farmer: Ramesh Patel</span>
+            <button className="btn btn-secondary" onClick={handleLogout}>Log Out</button>
           </div>
         </div>
       </header>
@@ -1386,15 +1366,15 @@ export default function App() {
                 marginBottom: '16px'
               }}>
                 {[
-                  { id: 'home', label: t.nav.overview, color: '#38BDF8' },
-                  { id: 'scan', label: t.nav.scanner, color: '#10B981' },
-                  { id: 'dosage', label: t.nav.dosage, color: '#F59E0B' },
-                  { id: 'irrigation', label: t.nav.irrigation, color: '#3B82F6' },
-                  { id: 'lifecycle', label: t.nav.lifecycle, color: '#10B981' },
-                  { id: 'reminders', label: t.nav.reminders, color: '#EC4899' },
-                  { id: 'harvest', label: t.nav.harvest, color: '#EAB308' },
-                  { id: 'weather', label: t.nav.weather, color: '#06B6D4' },
-                  { id: 'history', label: t.nav.history, color: '#8B5CF6' }
+                  { id: 'home', label: '📊 Overview & Validation', color: '#38BDF8' },
+                  { id: 'scan', label: '📸 AI Diagnostic Scanner', color: '#10B981' },
+                  { id: 'dosage', label: '🧪 Knapsack Sprayer & Dilution', color: '#F59E0B' },
+                  { id: 'irrigation', label: '💧 FAO-56 Smart Irrigation', color: '#3B82F6' },
+                  { id: 'lifecycle', label: '📅 12-Week Roadmap', color: '#10B981' },
+                  { id: 'reminders', label: '🔔 Action Reminders', color: '#EC4899' },
+                  { id: 'harvest', label: '🌾 Harvest Readiness', color: '#EAB308' },
+                  { id: 'weather', label: '⛅ Weather Station', color: '#06B6D4' },
+                  { id: 'history', label: '📈 Growth Analytics', color: '#8B5CF6' }
                 ].map((tab) => {
                   const isActive = currentPage === tab.id;
                   return (
@@ -1455,19 +1435,6 @@ export default function App() {
               {currentPage === 'home' && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '24px' }}>
                   
-                  {/* MASTER SIMPLE FARMER ACTION VIEW */}
-                  <FarmerSimpleView
-                    selectedFarm={selectedFarm}
-                    suitabilityEval={suitabilityEval}
-                    activeScan={activeScan}
-                    onNavigateTab={(tabId) => setCurrentPage(tabId)}
-                    weatherData={weatherOverview}
-                    isSimpleMode={isFarmerSimpleMode}
-                    onToggleMode={() => setIsFarmerSimpleMode(!isFarmerSimpleMode)}
-                    currentLang={currentLang}
-                    onLanguageChange={handleGlobalLanguageChange}
-                  />
-
                   {/* AUTOMATED SEASONAL SOWING WINDOW ALERT */}
                   {suitabilityEval?.sowing_period && suitabilityEval.sowing_period.status !== 'SUITABLE' && (
                     <div style={{
@@ -1858,6 +1825,77 @@ export default function App() {
                           </p>
                         </div>
                       )}
+                    </div>
+
+                    {/* Quick 1-Tap Realistic Photo Buttons for Live Professor Demonstration */}
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginBottom: '16px' }}>
+                      <button
+                        type="button"
+                        className="btn btn-secondary"
+                        style={{
+                          background: 'rgba(16, 185, 129, 0.15)',
+                          borderColor: 'rgba(16, 185, 129, 0.4)',
+                          color: '#10B981',
+                          padding: '10px',
+                          fontSize: '13px',
+                          fontWeight: '700',
+                          borderRadius: '8px',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          gap: '6px'
+                        }}
+                        onClick={async () => {
+                          try {
+                            const res = await fetch('/samples/natural_healthy_maize.jpg');
+                            const blob = await res.blob();
+                            const file = new File([blob], 'natural_healthy_maize.jpg', { type: 'image/jpeg' });
+                            setSelectedFile(file);
+                            setImagePreview(URL.createObjectURL(blob));
+                            setImageDimensions({ width: 3000, height: 2250 });
+                            setScanSowingDate('2026-06-28');
+                            setScanDate('2026-07-28');
+                          } catch (err) {
+                            console.error('Error loading sample:', err);
+                          }
+                        }}
+                      >
+                        🌽 Load Healthy Maize
+                      </button>
+
+                      <button
+                        type="button"
+                        className="btn btn-secondary"
+                        style={{
+                          background: 'rgba(239, 68, 68, 0.15)',
+                          borderColor: 'rgba(239, 68, 68, 0.4)',
+                          color: '#EF4444',
+                          padding: '10px',
+                          fontSize: '13px',
+                          fontWeight: '700',
+                          borderRadius: '8px',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          gap: '6px'
+                        }}
+                        onClick={async () => {
+                          try {
+                            const res = await fetch('/samples/natural_infected_maize.jpg');
+                            const blob = await res.blob();
+                            const file = new File([blob], 'natural_infected_maize.jpg', { type: 'image/jpeg' });
+                            setSelectedFile(file);
+                            setImagePreview(URL.createObjectURL(blob));
+                            setImageDimensions({ width: 612, height: 408 });
+                            setScanSowingDate('2026-06-28');
+                            setScanDate('2026-07-28');
+                          } catch (err) {
+                            console.error('Error loading sample:', err);
+                          }
+                        }}
+                      >
+                        🚨 Load Infected Maize
+                      </button>
                     </div>
 
                     {/* Collapsible Sample Image Pickers for 10 Controlled Demo Scenarios */}
@@ -2370,64 +2408,6 @@ export default function App() {
                               <div style={{ fontSize: '12px', color: 'var(--text-muted)', lineHeight: '1.5' }}>
                                 Location: <strong>{selectedFarm.district}, {selectedFarm.state}</strong> • Soil: <strong>{selectedFarm.soil_type}</strong> • Variety: <strong>{selectedFarm.variety || 'GAYMH-1'}</strong>
                               </div>
-
-                              {/* INSECT DETAILS */}
-                              <div style={{
-                                marginTop: '12px',
-                                paddingTop: '10px',
-                                borderTop: '1px solid var(--border-color)',
-                                display: 'flex',
-                                flexDirection: 'column',
-                                gap: '6px'
-                              }}>
-                                <div className="evidence-header" style={{ marginBottom: '2px' }}>
-                                  <span className="evidence-tag" style={{ color: '#10B981', background: 'rgba(16, 185, 129, 0.12)' }}>
-                                    🐛 Insect Details
-                                  </span>
-                                  <span className="coord-chip" style={{ 
-                                    color: (health.disease_diagnosis?.detected_disease || activeScan.disease_log?.detected_disease || 'Healthy') !== 'Healthy' ? '#EF4444' : '#10B981',
-                                    borderColor: (health.disease_diagnosis?.detected_disease || activeScan.disease_log?.detected_disease || 'Healthy') !== 'Healthy' ? 'rgba(239, 68, 68, 0.4)' : 'rgba(16, 185, 129, 0.4)'
-                                  }}>
-                                    {(health.disease_diagnosis?.detected_disease || activeScan.disease_log?.detected_disease || 'Healthy') !== 'Healthy' ? 'INSECT VECTOR ACTIVE' : 'NO PEST'}
-                                  </span>
-                                </div>
-                                <p style={{
-                                  margin: 0,
-                                  fontSize: '12.5px',
-                                  color: 'var(--text-main)',
-                                  lineHeight: '1.55',
-                                  background: 'rgba(15, 23, 42, 0.6)',
-                                  padding: '8px 12px',
-                                  borderRadius: '8px',
-                                  border: '1px solid rgba(16, 185, 129, 0.25)'
-                                }}>
-                                  {(() => {
-                                    const dName = (health.disease_diagnosis?.detected_disease || activeScan.disease_log?.detected_disease || '').toLowerCase();
-                                    if (dName.includes('armyworm') || dName.includes('spodoptera') || dName.includes('faw') || dName.includes('caterpillar')) {
-                                      return 'Fall Armyworm (Spodoptera frugiperda) caterpillar is present in your image, feeding on the leaf whorls and causing ragged foliar damage.';
-                                    }
-                                    if (dName.includes('borer') || dName.includes('chilo')) {
-                                      return 'Spotted Stem Borer (Chilo partellus) larva is present in your image, creating entry pinholes and tunneling into the stalk internodes.';
-                                    }
-                                    if (dName.includes('aphid') || dName.includes('rhopalosiphum')) {
-                                      return 'Corn Leaf Aphids (Rhopalosiphum maidis) are present in your image, clustering on upper foliage with honeydew excretion.';
-                                    }
-                                    if (dName.includes('northern leaf blight') || dName.includes('blight')) {
-                                      return 'Fall Armyworm (Spodoptera frugiperda) caterpillar is present on the crop foliage in your image, with chewing wounds predisposing the leaf tissue to Northern Leaf Blight infection.';
-                                    }
-                                    if (dName.includes('common rust') || dName.includes('rust')) {
-                                      return 'Corn Leaf Aphids and Thrips are present on the leaf foliage in your image, breaking the cuticle and accelerating fungal rust pustule dispersal.';
-                                    }
-                                    if (dName.includes('gray leaf spot')) {
-                                      return 'Chewing caterpillar pests (Fall Armyworm) are present on the leaf blade in your image, aiding foliar necrotic lesion progression.';
-                                    }
-                                    if (dName === 'healthy' || dName === '') {
-                                      return 'No harmful insect pest or chewing caterpillar is present in your image. The crop foliage is clean and healthy.';
-                                    }
-                                    return 'Fall Armyworm (Spodoptera frugiperda) chewing caterpillar is present in your image, contributing to active foliar infection.';
-                                  })()}
-                                </p>
-                              </div>
                             </div>
 
                             {/* CARD 6: ACTIONABLE AGRONOMIC ADVISORY */}
@@ -2510,12 +2490,12 @@ export default function App() {
 
               {/* 5. PRECISION KNAPSACK DOSAGE MODULE 3 VIEW */}
               {currentPage === 'dosage' && (
-                <TankDilutionCalculator selectedFarm={selectedFarm} activeScan={activeScan} currentLang={currentLang} />
+                <TankDilutionCalculator selectedFarm={selectedFarm} />
               )}
 
               {/* 6. SMART IRRIGATION FAO-56 MODULE 3/5 VIEW */}
               {currentPage === 'irrigation' && (
-                <IrrigationDashboard selectedFarm={selectedFarm} currentLang={currentLang} />
+                <IrrigationDashboard selectedFarm={selectedFarm} />
               )}
 
               {/* 7. 12-WEEK LIFECYCLE ROADMAP MODULE 6 VIEW */}
@@ -3060,7 +3040,9 @@ export default function App() {
           </div>
         </div>
       )}
-      <PWAInstallPrompt />
+
+      {/* Progressive Web App Install & Offline Handler */}
+      <PwaInstallPrompt />
     </div>
   );
 }

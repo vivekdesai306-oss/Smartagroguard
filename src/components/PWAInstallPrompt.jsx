@@ -1,173 +1,388 @@
 import React, { useState, useEffect } from 'react';
-import { PWAService } from '../services/pwaService';
 
-export default function PWAInstallPrompt() {
-  const [canInstall, setCanInstall] = useState(false);
-  const [isIOSDevice, setIsIOSDevice] = useState(false);
-  const [isDismissed, setIsDismissed] = useState(false);
+export default function PwaInstallPrompt() {
+  const [deferredPrompt, setDeferredPrompt] = useState(null);
+  const [isInstallable, setIsInstallable] = useState(false);
   const [isInstalled, setIsInstalled] = useState(false);
-  const [showGuideModal, setShowGuideModal] = useState(false);
+  const [isIOS, setIsIOS] = useState(false);
+  const [showIosGuide, setShowIosGuide] = useState(false);
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
+  const [showOnlineToast, setShowOnlineToast] = useState(false);
 
   useEffect(() => {
-    // Check if already running in standalone PWA mode
-    if (PWAService.isStandalone()) {
+    // Check if already running in standalone / installed mode
+    const isStandalone = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
+    if (isStandalone) {
       setIsInstalled(true);
-      return;
     }
 
-    // Check if user previously dismissed prompt in this session
-    const dismissed = sessionStorage.getItem('agroguard_pwa_install_dismissed');
-    if (dismissed === 'true') {
-      setIsDismissed(true);
-    }
+    // Detect iOS
+    const userAgent = window.navigator.userAgent.toLowerCase();
+    const isAppleDevice = /iphone|ipad|ipod/.test(userAgent) && !window.MSStream;
+    setIsIOS(isAppleDevice);
 
-    // iOS detection
-    if (PWAService.isIOS()) {
-      setIsIOSDevice(true);
-    }
+    // Capture Chrome/Android/Desktop install event
+    const handleBeforeInstallPrompt = (e) => {
+      e.preventDefault();
+      setDeferredPrompt(e);
+      setIsInstallable(true);
+    };
 
-    // Listen for installable status
-    const unsubscribe = PWAService.onInstallableChange((installable) => {
-      setCanInstall(installable);
-    });
+    window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
 
-    return () => unsubscribe();
+    // App installed event
+    const handleAppInstalled = () => {
+      setIsInstalled(true);
+      setIsInstallable(false);
+      setDeferredPrompt(null);
+    };
+
+    window.addEventListener('appinstalled', handleAppInstalled);
+
+    // Network connectivity listeners
+    const handleOnline = () => {
+      setIsOnline(true);
+      setShowOnlineToast(true);
+      setTimeout(() => setShowOnlineToast(false), 3500);
+    };
+
+    const handleOffline = () => {
+      setIsOnline(false);
+    };
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    return () => {
+      window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+      window.removeEventListener('appinstalled', handleAppInstalled);
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
   }, []);
 
   const handleInstallClick = async () => {
-    PWAService.triggerHaptic([40, 30, 40]);
-
-    if (isIOSDevice) {
-      setShowGuideModal(true);
+    if (isIOS) {
+      setShowIosGuide(true);
       return;
     }
 
-    const res = await PWAService.promptInstall();
-    if (res && res.outcome === 'accepted') {
+    if (!deferredPrompt) return;
+
+    deferredPrompt.prompt();
+    const { outcome } = await deferredPrompt.userChoice;
+    if (outcome === 'accepted') {
       setIsInstalled(true);
-      PWAService.triggerHaptic([60, 60, 100]);
-    } else {
-      // If browser doesn't support JS install trigger or no prompt available, show visual instructions
-      setShowGuideModal(true);
+      setIsInstallable(false);
     }
+    setDeferredPrompt(null);
   };
-
-  const handleDismiss = () => {
-    setIsDismissed(true);
-    sessionStorage.setItem('agroguard_pwa_install_dismissed', 'true');
-  };
-
-  if (isInstalled || isDismissed) {
-    return null;
-  }
 
   return (
     <>
-      <div className="pwa-install-banner">
-        <div className="pwa-install-left">
-          <div className="pwa-icon-glow">
-            <img src="/icons/icon-192x192.png" alt="AgroGuard Logo" className="pwa-logo-img" />
-          </div>
-          <div className="pwa-install-texts">
-            <div className="pwa-install-title">
-              Install AgroGuard App
-              <span className="pwa-badge-pill">PWA</span>
-            </div>
-            <p className="pwa-install-desc">
-              1-tap homescreen launch, full-screen mode & offline field access.
-            </p>
-          </div>
+      {/* Offline Status Pill */}
+      {!isOnline && (
+        <div style={{
+          position: 'fixed',
+          top: '12px',
+          left: '50%',
+          transform: 'translateX(-50%)',
+          zIndex: 99999,
+          background: 'rgba(239, 68, 68, 0.95)',
+          color: '#ffffff',
+          padding: '8px 18px',
+          borderRadius: '9999px',
+          boxShadow: '0 10px 25px -5px rgba(239, 68, 68, 0.5), 0 8px 10px -6px rgba(0, 0, 0, 0.2)',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '8px',
+          fontSize: '13px',
+          fontWeight: 600,
+          backdropFilter: 'blur(8px)',
+          border: '1px solid rgba(255, 255, 255, 0.2)',
+          animation: 'pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite'
+        }}>
+          <span style={{ fontSize: '16px' }}>⚡</span>
+          <span>Offline Mode Active • Cached agricultural data available</span>
         </div>
+      )}
 
-        <div className="pwa-install-actions">
-          <button 
-            className="pwa-btn-install"
-            onClick={handleInstallClick}
-            title="Install AgroGuard on your home screen or desktop"
-          >
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-              <polyline points="7 10 12 15 17 10"></polyline>
-              <line x1="12" y1="15" x2="12" y2="3"></line>
-            </svg>
-            <span>Install App</span>
-          </button>
-          
-          <button 
-            className="pwa-btn-dismiss" 
-            onClick={handleDismiss} 
-            title="Dismiss installation banner"
-            aria-label="Dismiss"
-          >
-            ✕
-          </button>
+      {/* Reconnected Toast */}
+      {showOnlineToast && (
+        <div style={{
+          position: 'fixed',
+          top: '12px',
+          left: '50%',
+          transform: 'translateX(-50%)',
+          zIndex: 99999,
+          background: 'rgba(16, 185, 129, 0.95)',
+          color: '#ffffff',
+          padding: '8px 18px',
+          borderRadius: '9999px',
+          boxShadow: '0 10px 25px -5px rgba(16, 185, 129, 0.5)',
+          display: 'flex',
+          alignItems: 'center',
+          gap: '8px',
+          fontSize: '13px',
+          fontWeight: 600,
+          backdropFilter: 'blur(8px)',
+          border: '1px solid rgba(255, 255, 255, 0.2)'
+        }}>
+          <span>🟢</span>
+          <span>Connection restored • Live farm sensors syncing</span>
         </div>
-      </div>
+      )}
 
-      {/* Guided Installation Modal (Android / iOS / Desktop) */}
-      {showGuideModal && (
-        <div className="pwa-ios-modal-overlay" onClick={() => setShowGuideModal(false)}>
-          <div className="pwa-ios-modal" onClick={(e) => e.stopPropagation()}>
-            <div className="pwa-ios-header">
-              <div className="pwa-icon-glow" style={{ width: 44, height: 44 }}>
-                <img src="/icons/icon-192x192.png" alt="AgroGuard" style={{ width: '100%', height: '100%', borderRadius: 10 }} />
+      {/* Floating PWA Install Banner (When installable or on iOS without standalone) */}
+      {!isInstalled && (isInstallable || (isIOS && !isInstalled)) && (
+        <div style={{
+          position: 'fixed',
+          bottom: '20px',
+          left: '50%',
+          transform: 'translateX(-50%)',
+          zIndex: 99990,
+          width: 'calc(100% - 32px)',
+          maxWidth: '520px',
+          background: 'linear-gradient(135deg, rgba(15, 23, 42, 0.95) 0%, rgba(30, 41, 59, 0.95) 100%)',
+          backdropFilter: 'blur(16px)',
+          border: '1px solid rgba(16, 185, 129, 0.3)',
+          borderRadius: '20px',
+          padding: '14px 18px',
+          boxShadow: '0 20px 35px -10px rgba(0, 0, 0, 0.7), 0 0 20px 0 rgba(16, 185, 129, 0.2)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: '12px',
+          animation: 'slideUp 0.4s ease-out'
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '12px', minWidth: 0 }}>
+            <img
+              src="/pwa-192x192.png"
+              alt="AgroGuard Icon"
+              style={{
+                width: '44px',
+                height: '44px',
+                borderRadius: '12px',
+                boxShadow: '0 4px 12px rgba(16, 185, 129, 0.3)',
+                flexShrink: 0
+              }}
+            />
+            <div style={{ minWidth: 0 }}>
+              <div style={{
+                color: '#F8FAFC',
+                fontWeight: 700,
+                fontSize: '14px',
+                letterSpacing: '0.3px',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px'
+              }}>
+                <span>AgroGuard Mobile App</span>
+                <span style={{
+                  background: 'rgba(16, 185, 129, 0.2)',
+                  color: '#34D399',
+                  fontSize: '10px',
+                  padding: '2px 6px',
+                  borderRadius: '6px',
+                  fontWeight: 600
+                }}>PWA</span>
               </div>
-              <h3 style={{ margin: 0, color: '#fff', fontSize: '1.25rem', fontWeight: 700 }}>
-                {isIOSDevice ? 'Install on iPhone / iPad' : 'Add to Home Screen'}
-              </h3>
-              <button className="pwa-btn-dismiss" onClick={() => setShowGuideModal(false)}>✕</button>
+              <div style={{
+                color: '#94A3B8',
+                fontSize: '12px',
+                whiteSpace: 'nowrap',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis'
+              }}>
+                Install for offline scan & real-time weather
+              </div>
             </div>
-            
-            <p style={{ color: '#9ca3af', fontSize: '0.92rem', margin: '14px 0 20px', lineHeight: 1.5 }}>
-              {isIOSDevice 
-                ? 'Follow these 2 quick steps in Apple Safari:' 
-                : 'Your browser requires adding the app via the browser menu:'}
-            </p>
+          </div>
 
-            <div className="pwa-ios-steps">
-              {isIOSDevice ? (
-                <>
-                  <div className="pwa-ios-step">
-                    <div className="pwa-step-number">1</div>
-                    <div>
-                      Tap the <strong>Share</strong> button <span style={{ fontSize: '1.2rem' }}>⎙</span> in Safari's bottom toolbar.
-                    </div>
-                  </div>
-                  <div className="pwa-ios-step">
-                    <div className="pwa-step-number">2</div>
-                    <div>
-                      Scroll down and tap <strong>Add to Home Screen</strong> <span style={{ fontSize: '1.2rem' }}>➕</span>.
-                    </div>
-                  </div>
-                </>
-              ) : (
-                <>
-                  <div className="pwa-ios-step">
-                    <div className="pwa-step-number">1</div>
-                    <div>
-                      Tap the <strong>three dots menu (⋮)</strong> in the top-right corner of Chrome or your browser.
-                    </div>
-                  </div>
-                  <div className="pwa-ios-step">
-                    <div className="pwa-step-number">2</div>
-                    <div>
-                      Tap <strong>Install app</strong> or <strong>Add to Home screen</strong>.
-                    </div>
-                  </div>
-                </>
-              )}
-            </div>
-
-            <button 
-              className="pwa-btn-install" 
-              style={{ width: '100%', marginTop: '20px', justifyContent: 'center' }} 
-              onClick={() => setShowGuideModal(false)}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
+            <button
+              onClick={handleInstallClick}
+              style={{
+                background: 'linear-gradient(135deg, #10B981 0%, #059669 100%)',
+                color: '#FFFFFF',
+                border: 'none',
+                borderRadius: '12px',
+                padding: '9px 16px',
+                fontWeight: 700,
+                fontSize: '13px',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px',
+                boxShadow: '0 4px 14px rgba(16, 185, 129, 0.4)',
+                transition: 'all 0.2s ease'
+              }}
+              onMouseEnter={(e) => e.currentTarget.style.transform = 'scale(1.03)'}
+              onMouseLeave={(e) => e.currentTarget.style.transform = 'scale(1)'}
             >
-              Understood
+              <span>📲</span>
+              <span>Install</span>
+            </button>
+
+            <button
+              onClick={() => {
+                setIsInstallable(false);
+                setIsIOS(false);
+              }}
+              aria-label="Dismiss"
+              style={{
+                background: 'rgba(255, 255, 255, 0.08)',
+                color: '#94A3B8',
+                border: 'none',
+                borderRadius: '10px',
+                width: '32px',
+                height: '32px',
+                cursor: 'pointer',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                fontSize: '14px'
+              }}
+            >
+              ✕
             </button>
           </div>
         </div>
       )}
+
+      {/* iOS Installation Instructions Modal */}
+      {showIosGuide && (
+        <div style={{
+          position: 'fixed',
+          inset: 0,
+          zIndex: 99999,
+          background: 'rgba(0, 0, 0, 0.75)',
+          backdropFilter: 'blur(8px)',
+          display: 'flex',
+          alignItems: 'flex-end',
+          justifyContent: 'center',
+          padding: '16px'
+        }}>
+          <div style={{
+            background: '#0F172A',
+            border: '1px solid rgba(16, 185, 129, 0.4)',
+            borderRadius: '24px 24px 20px 20px',
+            width: '100%',
+            maxWidth: '480px',
+            padding: '24px',
+            color: '#F8FAFC',
+            boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.8)',
+            animation: 'slideUp 0.3s ease-out'
+          }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '16px' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                <img src="/pwa-192x192.png" alt="AgroGuard" style={{ width: '36px', height: '36px', borderRadius: '10px' }} />
+                <h3 style={{ margin: 0, fontSize: '18px', fontWeight: 700, color: '#34D399' }}>Install on iPhone / iPad</h3>
+              </div>
+              <button
+                onClick={() => setShowIosGuide(false)}
+                style={{
+                  background: 'rgba(255, 255, 255, 0.1)',
+                  border: 'none',
+                  color: '#94A3B8',
+                  borderRadius: '50%',
+                  width: '28px',
+                  height: '28px',
+                  cursor: 'pointer'
+                }}
+              >✕</button>
+            </div>
+
+            <p style={{ color: '#94A3B8', fontSize: '13px', lineHeight: 1.5, margin: '0 0 16px 0' }}>
+              Apple Safari lets you install AgroGuard directly without the App Store:
+            </p>
+
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+              <div style={{
+                background: 'rgba(30, 41, 59, 0.8)',
+                padding: '12px 14px',
+                borderRadius: '12px',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '12px'
+              }}>
+                <div style={{
+                  background: '#10B981',
+                  color: '#0F172A',
+                  width: '26px',
+                  height: '26px',
+                  borderRadius: '50%',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontWeight: 800,
+                  fontSize: '13px'
+                }}>1</div>
+                <div style={{ fontSize: '13px', color: '#E2E8F0' }}>
+                  Tap the <strong style={{ color: '#38BDF8' }}>Share</strong> button (box with an arrow pointing up) at the bottom of Safari.
+                </div>
+              </div>
+
+              <div style={{
+                background: 'rgba(30, 41, 59, 0.8)',
+                padding: '12px 14px',
+                borderRadius: '12px',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '12px'
+              }}>
+                <div style={{
+                  background: '#10B981',
+                  color: '#0F172A',
+                  width: '26px',
+                  height: '26px',
+                  borderRadius: '50%',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontWeight: 800,
+                  fontSize: '13px'
+                }}>2</div>
+                <div style={{ fontSize: '13px', color: '#E2E8F0' }}>
+                  Scroll down and tap <strong style={{ color: '#34D399' }}>"Add to Home Screen" ➕</strong>.
+                </div>
+              </div>
+            </div>
+
+            <button
+              onClick={() => setShowIosGuide(false)}
+              style={{
+                width: '100%',
+                marginTop: '18px',
+                background: 'linear-gradient(135deg, #10B981 0%, #059669 100%)',
+                color: '#FFFFFF',
+                border: 'none',
+                borderRadius: '12px',
+                padding: '12px',
+                fontWeight: 700,
+                fontSize: '14px',
+                cursor: 'pointer'
+              }}
+            >
+              Got it!
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Global CSS animation helpers */}
+      <style>{`
+        @keyframes slideUp {
+          from {
+            opacity: 0;
+            transform: translate(-50%, 20px);
+          }
+          to {
+            opacity: 1;
+            transform: translate(-50%, 0);
+          }
+        }
+      `}</style>
     </>
   );
 }
